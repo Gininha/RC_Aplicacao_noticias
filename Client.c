@@ -59,6 +59,8 @@ void subscribe_topic(char *id){
     int nbytes;
 
     while(1){
+        msg[0] = '\0';
+        
         if ((nbytes = recvfrom(sock, msg, sizeof(msg), 0, (struct sockaddr *)&addr, &addrlen)) < 0) {
             perror("recvfrom");
             exit(1);
@@ -130,7 +132,10 @@ int main(int argc, char *argv[]){
         token = strtok(buffer, " ");
   
         if(strcmp(token, "LIST_TOPICS") == 0){
-            write(fd, msg, 1 + strlen(msg));    
+            write(fd, msg, 1 + strlen(msg));
+            nread = read(fd, buffer, BUFLEN - 1); // Ler mensagem vinda do cliente
+            buffer[nread] = '\0';
+            printf("%s\n", buffer);   
         }
 
 
@@ -149,6 +154,9 @@ int main(int argc, char *argv[]){
 
         if(strcmp(token, "CREATE_TOPIC") == 0){
             write(fd, msg, 1 + strlen(msg));
+            nread = read(fd, buffer, BUFLEN - 1); // Ler mensagem vinda do cliente
+            buffer[nread] = '\0';
+            printf("%s\n", buffer);
         }
 
 

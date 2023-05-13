@@ -12,8 +12,10 @@
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <semaphore.h>
+#include <sys/msg.h>
 
 #define BUFLEN 1024 // Tamanho do buffer
+#define MQ_ID 1447
 
 #define USERNAME "Username: \0"
 #define PASSWORD "Password: \0"
@@ -23,6 +25,7 @@
 #define DEL_USER_WRONG "DEL {username}\n\0"
 #define SERVER_FINISH "Servidor Terminado !!!\n\0"
 #define SERVER_CONNECT "Admitido\n\0"
+#define NO_TOPICS "No Topics Available at the moment!!!\n\0"
 
 typedef struct
 {
@@ -33,17 +36,23 @@ typedef struct
 
 typedef struct TOPICS
 {
-    char id[BUFLEN];
-    char Titulo[BUFLEN];
+    char id[5];
+    char Titulo[150];
     struct TOPICS *next;
     int num_topicos;
     int multicast_socket;
     struct sockaddr_in addr;
 } TOPICS;
 
+typedef struct MQ
+{
+    long id;
+    char message[512];
+}MQ;
+
 TOPICS *topicos;
 key_t key;
-int shmid;
+int shmid, mq_id;
 sem_t mutex;
 
 void erro(char *s)
@@ -450,11 +459,13 @@ int welcome_message(int client, char *my_role)
     return permissoes;
 }
 
-void create_multicast(TOPICS *tops)
+void create_multicast(TOPICS *tops, int client)
 {
     char *ip = malloc(sizeof(char) * (8 + strlen(tops->id)));
 
     int port = 5000 + atoi(tops->id);
+    
+    MQ message;
 
     strcpy(ip, "239.0.0.");
     strcat(ip, tops->id);
@@ -478,9 +489,29 @@ void create_multicast(TOPICS *tops)
         perror("setsockopt");
         exit(1);
     }
+    char message_client[1054];
+    sprintf(message_client, "Topico %s criado com sucesso!!!\n", tops->Titulo);
+
+    write(client, message_client, 1+strlen(message_client));
+
+    while(1){
+
+        if (msgrcv(mq_id, &message, sizeof(MQ) - sizeof(long), atoi(tops->id), 0) < 0) {
+            perror("msgrcv");
+            exit(1);
+        }
+        printf("%s\n", message.message);
+
+        
+        if (sendto(tops->multicast_socket, message.message, strlen(message.message), 0, (struct sockaddr *)&tops->addr, sizeof(tops->addr)) < 0) {
+            perror("sendto");
+            exit(1);
+        }
+        
+    }
 }
 
-void create_topic(char *title, char *id_topic)
+void create_topic(char *title, char *id_topic, int client)
 {
 
     sem_wait(&mutex);
@@ -490,7 +521,7 @@ void create_topic(char *title, char *id_topic)
         strcpy(topicos->id, id_topic);
         strcpy(topicos->Titulo, title);
         topicos->next = NULL;
-        create_multicast(topicos);
+        create_multicast(topicos, client);
     }
     else
     {
@@ -509,41 +540,10 @@ void create_topic(char *title, char *id_topic)
         strcpy(aux->next->id, id_topic);
         strcpy(aux->next->Titulo, title);
         aux->next->next = NULL;
-        create_multicast(topicos);
+        create_multicast(topicos, client);
     }
     topicos->num_topicos++;
     sem_post(&mutex);
-}
-
-void send_news(char *id, char *news)
-{
-
-    struct sockaddr_in addr;
-    int sock;
-    char *ip = malloc(sizeof(char) * (8 + strlen(id)));
-    int port = 5000 + atoi(id);
-
-    strcpy(ip, "239.0.0.");
-    strcat(ip, id);
-    
-    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
-    {
-        perror("socket");
-        exit(1);
-    }
-
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr(ip);
-    addr.sin_port = htons(port);
-
-    if (sendto(sock, news, strlen(news), 0, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-    {
-        perror("sendto");
-        exit(1);
-    }
-
-    close(sock);
 }
 
 void process_client(int client, char *my_role)
@@ -554,6 +554,7 @@ void process_client(int client, char *my_role)
     char id_topic[BUFLEN], title[BUFLEN], news[BUFLEN] = "";
     char *token;
     int permissoes = welcome_message(client, my_role);
+    MQ message;
 
     while (1)
     {
@@ -565,15 +566,29 @@ void process_client(int client, char *my_role)
 
         if (strcmp(token, "LIST_TOPICS") == 0)
         {
+            char temp[200];
+            char envio[BUFLEN];
+            envio[0] = '\0';
+
             printf("List:\n");
             TOPICS *aux = topicos;
             int i = 1;
+            if(aux->num_topicos == 0){
+                write(client, NO_TOPICS, strlen(NO_TOPICS));
+                printf("Entrei\n");
+                continue;
+            }
             while (aux != NULL)
             {
-                printf("Topicos[%d]-> Id: %s\tTitle: %s\n", i, aux->id, aux->Titulo);
+                printf("Entrei_2\n");
+                sprintf(temp, "Topico[%d]-> Id: %s\tTitle: %s\n", i, aux->id, aux->Titulo);
+                strcat(envio, temp);
                 aux = aux->next;
                 i++;
             }
+            envio[strlen(envio)+1] = '\0';
+
+            write(client, envio, strlen(envio));
         }
 
         if (strcmp(token, "CREATE_TOPIC") == 0)
@@ -593,36 +608,38 @@ void process_client(int client, char *my_role)
             strcpy(title, token);
             if (fork() == 0)
             {
-                create_topic(title, id_topic);
-                while (1)
-                {
-                    sleep(1);
-                }
+                create_topic(title, id_topic, client);
             }
+            
         }
 
         if (strcmp(token, "SEND_NEWS") == 0)
         {
-            if ((token = strtok(NULL, " ")) == 0)
+            if ((token = strtok(NULL, " ")) == NULL)
             {
                 printf("SEND_NEWS <id do tópico> <noticia>\n");
                 continue;
             }
             strcpy(id_topic, token);
+            
+            // Reset the news string
+            strcpy(news, "");
 
             while ((token = strtok(NULL, " ")) != NULL)
             {
                 strcat(news, token);
                 strcat(news, " ");
             }
-
-            send_news(id_topic, news);
+            message.id = atoi(id_topic);
+            strcpy(message.message, news);
+               
+            if (msgsnd(mq_id, &message, sizeof(MQ) - sizeof(long), 0) < 0) {
+                perror("msgsnd");
+                exit(1);
+            }
         }
 
-        if (strcmp(token, "EXIT") == 0)
-        {
-            return;
-        }
+        buffer[0] = '\0';
     }
 }
 
@@ -651,6 +668,12 @@ void init()
     {
         perror("sem_init");
         exit(1);
+    }
+
+    //Criacao Message Queue;
+    if((mq_id = msgget(MQ_ID, IPC_CREAT|0777))<0){
+        perror("msgget");
+        exit(0);
     }
 }
 
